@@ -1,0 +1,164 @@
+-- ============================================
+-- STEP 1: CREATE THE MONITORING VIEW
+-- ============================================
+-- Run this first in SQL Server Management Studio (SSMS)
+-- This creates a view that calculates identity metrics in real-time
+
+USE YourDatabaseName;  -- CHANGE THIS TO YOUR DATABASE
+GO
+
+CREATE OR ALTER VIEW dbo.vw_IdentityMetrics
+AS
+WITH IdentityInfo AS (
+    SELECT 
+        s.name AS SchemaName,
+        t.name AS TableName,
+        c.name AS ColumnName,
+        tp.name AS DataType,
+        CAST(IDENT_CURRENT(QUOTENAME(s.name) + '.' + QUOTENAME(t.name)) AS BIGINT) AS CurrentIdentityValue,
+        CAST(IDENT_INCR(QUOTENAME(s.name) + '.' + QUOTENAME(t.name)) AS INT) AS IdentityIncrement,
+        CAST(IDENT_SEED(QUOTENAME(s.name) + '.' + QUOTENAME(t.name)) AS BIGINT) AS IdentitySeed,
+        CASE tp.name
+            WHEN 'tinyint' THEN 255
+            WHEN 'smallint' THEN 32767
+            WHEN 'int' THEN 2147483647
+            WHEN 'bigint' THEN 9223372036854775807
+            ELSE NULL
+        END AS MaxLimit
+    FROM 
+        sys.tables t
+        INNER JOIN sys.schemas s ON t.schema_id = s.schema_id
+        INNER JOIN sys.columns c ON t.object_id = c.object_id
+        INNER JOIN sys.types tp ON c.user_type_id = tp.user_type_id
+    WHERE 
+        c.is_identity = 1
+        AND t.is_ms_shipped = 0
+)
+SELECT 
+    SchemaName,
+    TableName,
+    ColumnName,
+    DataType,
+    CurrentIdentityValue,
+    IdentityIncrement,
+    IdentitySeed,
+    MaxLimit,
+    CAST((CAST(CurrentIdentityValue AS FLOAT) / NULLIF(MaxLimit, 0)) * 100 AS DECIMAL(10,4)) AS PercentUsed,
+    CAST((MaxLimit - CurrentIdentityValue) / NULLIF(IdentityIncrement, 0) AS BIGINT) AS RemainingIncrements,
+    GETDATE() AS LastChecked
+FROM 
+    IdentityInfo
+WHERE 
+    MaxLimit IS NOT NULL;
+GO
+
+-- Test the view
+SELECT * FROM dbo.vw_IdentityMetrics ORDER BY PercentUsed DESC;
+GO
+
+-- ============================================
+-- STEP 2: CREATE HISTORICAL TRACKING TABLE
+-- ============================================
+-- This stores historical data for trend analysis
+
+CREATE TABLE dbo.IdentityUsageHistory (
+    ID INT IDENTITY(1,1) PRIMARY KEY,
+    SchemaName NVARCHAR(128) NOT NULL,
+    TableName NVARCHAR(128) NOT NULL,
+    ColumnName NVARCHAR(128) NOT NULL,
+    CurrentIdentityValue BIGINT NOT NULL,
+    PercentUsed DECIMAL(10,4) NOT NULL,
+    RecordedAt DATETIME2 DEFAULT GETDATE(),
+    INDEX IX_IdentityUsageHistory_RecordedAt (RecordedAt),
+    INDEX IX_IdentityUsageHistory_Table (SchemaName, TableName, ColumnName)
+);
+GO
+
+-- ============================================
+-- STEP 3: CREATE STORED PROCEDURE TO RECORD HISTORY
+-- ============================================
+-- This will be run on a schedule to capture snapshots
+
+CREATE OR ALTER PROCEDURE dbo.usp_RecordIdentityUsage
+AS
+BEGIN
+    SET NOCOUNT ON;
+    
+    INSERT INTO dbo.IdentityUsageHistory (SchemaName, TableName, ColumnName, CurrentIdentityValue, PercentUsed)
+    SELECT 
+        SchemaName,
+        TableName,
+        ColumnName,
+        CurrentIdentityValue,
+        PercentUsed
+    FROM 
+        dbo.vw_IdentityMetrics;
+    
+    -- Clean up old records (keep 90 days)
+    DELETE FROM dbo.IdentityUsageHistory
+    WHERE RecordedAt < DATEADD(DAY, -90, GETDATE());
+END;
+GO
+
+-- Test the stored procedure
+EXEC dbo.usp_RecordIdentityUsage;
+SELECT TOP 10 * FROM dbo.IdentityUsageHistory ORDER BY RecordedAt DESC;
+GO
+
+-- ============================================
+-- STEP 4: CREATE SQL SERVER AGENT JOB
+-- ============================================
+-- This schedules the history recording to run every 6 hours
+-- Run this in SSMS (requires sysadmin or SQLAgentOperatorRole permissions)
+
+USE msdb;
+GO
+
+-- Create the job
+EXEC dbo.sp_add_job
+    @job_name = N'Record Identity Usage History',
+    @enabled = 1,
+    @description = N'Records identity column usage for monitoring and trend analysis';
+
+-- Add job step
+EXEC dbo.sp_add_jobstep
+    @job_name = N'Record Identity Usage History',
+    @step_name = N'Execute Recording Procedure',
+    @subsystem = N'TSQL',
+    @database_name = N'YourDatabaseName',  -- CHANGE THIS TO YOUR DATABASE
+    @command = N'EXEC dbo.usp_RecordIdentityUsage;',
+    @retry_attempts = 3,
+    @retry_interval = 5;
+
+-- Create schedule (runs every 6 hours)
+EXEC dbo.sp_add_schedule
+    @schedule_name = N'Every 6 Hours',
+    @freq_type = 4,  -- Daily
+    @freq_interval = 1,
+    @freq_subday_type = 8,  -- Hours
+    @freq_subday_interval = 6;
+
+-- Attach schedule to job
+EXEC dbo.sp_attach_schedule
+    @job_name = N'Record Identity Usage History',
+    @schedule_name = N'Every 6 Hours';
+
+-- Add job to local server
+EXEC dbo.sp_add_jobserver
+    @job_name = N'Record Identity Usage History';
+GO
+
+-- Verify the job was created
+SELECT 
+    j.name AS JobName,
+    j.enabled AS IsEnabled,
+    s.name AS ScheduleName,
+    CASE s.freq_type
+        WHEN 4 THEN 'Daily'
+        ELSE 'Other'
+    END AS Frequency
+FROM msdb.dbo.sysjobs j
+LEFT JOIN msdb.dbo.sysjobschedules js ON j.job_id = js.job_id
+LEFT JOIN msdb.dbo.sysschedules s ON js.schedule_id = s.schedule_id
+WHERE j.name = 'Record Identity Usage History';
+GO
