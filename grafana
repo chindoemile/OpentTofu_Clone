@@ -1,0 +1,417 @@
+# Complete Implementation Guide: Identity Monitoring with Grafana
+
+## Prerequisites
+- SQL Server (2016 or later)
+- SQL Server Management Studio (SSMS)
+- Grafana installed (version 8.0 or later)
+- Database permissions: db_owner or CREATE VIEW, CREATE TABLE, CREATE PROCEDURE
+- SQL Agent permissions for scheduling jobs
+
+---
+
+## Phase 1: SQL Server Setup (15-20 minutes)
+
+### Step 1: Create Database Objects
+
+1. **Open SQL Server Management Studio (SSMS)**
+   - Connect to your SQL Server instance
+   - Select the database you want to monitor
+
+2. **Run the SQL script** (from the artifact)
+   - Copy the entire script from the artifact
+   - Replace `YourDatabaseName` with your actual database name (appears in 2 places)
+   - Execute the script (F5)
+
+3. **Verify the installation**
+   ```sql
+   -- Check if view was created
+   SELECT * FROM dbo.vw_IdentityMetrics;
+   
+   -- Check if tracking table exists
+   SELECT TOP 5 * FROM dbo.IdentityUsageHistory;
+   
+   -- Verify stored procedure
+   EXEC dbo.usp_RecordIdentityUsage;
+   ```
+
+### Step 2: Configure SQL Server Agent Job
+
+1. **In SSMS, expand:**
+   - SQL Server Agent
+   - Jobs
+
+2. **Verify the job "Record Identity Usage History" exists**
+   - Right-click the job → Properties
+   - Check the schedule: Should run every 6 hours
+   - Click "Steps" → Verify the database name is correct
+
+3. **Test the job manually**
+   - Right-click the job → Start Job at Step
+   - Check Job History to ensure it ran successfully
+
+4. **Wait a few days** to accumulate historical data for trend analysis
+
+---
+
+## Phase 2: Grafana Setup (30-40 minutes)
+
+### Step 3: Configure SQL Server Data Source in Grafana
+
+1. **Open Grafana** (usually http://localhost:3000 or your Grafana URL)
+
+2. **Navigate to Configuration**
+   - Click gear icon ⚙️ on left sidebar
+   - Click "Data sources"
+   - Click "Add data source"
+
+3. **Select Microsoft SQL Server**
+   - Search for "SQL Server" or "MSSQL"
+   - Click on it
+
+4. **Configure the connection**
+   ```
+   Name: SQL Server - Identity Monitoring
+   Host: your-server-name:1433 (or just server-name if default port)
+   Database: YourDatabaseName
+   Authentication: SQL Server Authentication (or Windows if configured)
+   User: your_sql_username
+   Password: your_sql_password
+   Encrypt: Auto (or TLS if required)
+   ```
+
+5. **Click "Save & Test"**
+   - Should see green "Database Connection OK"
+   - If error, check firewall, credentials, and SQL Server TCP/IP enabled
+
+### Step 4: Create the Dashboard
+
+1. **Create a new dashboard**
+   - Click "+" on left sidebar
+   - Click "Dashboard"
+   - Click "Add new panel"
+
+2. **Panel 1: Identity Usage Time Series**
+   - In the query editor, select your SQL Server data source
+   - Click "Code" mode (toggle in bottom right)
+   - Paste this query:
+   ```sql
+   SELECT 
+       GETDATE() AS time,
+       CONCAT(SchemaName, '.', TableName) AS metric,
+       PercentUsed AS value
+   FROM 
+       dbo.vw_IdentityMetrics
+   ORDER BY 
+       PercentUsed DESC;
+   ```
+   - Panel settings (right side):
+     - Title: "Identity Column Usage %"
+     - Visualization: Time series
+     - Unit: Percent (0-100)
+     - Min: 0, Max: 100
+   - Click "Apply"
+
+3. **Panel 2: Critical Tables (Stat Panel)**
+   - Click "Add" → "Visualization"
+   - Query:
+   ```sql
+   SELECT COUNT(*) AS value
+   FROM dbo.vw_IdentityMetrics
+   WHERE PercentUsed >= 90;
+   ```
+   - Visualization: Stat
+   - Title: "Critical Tables (>90%)"
+   - Color scheme: Red if > 0
+   - Text size: Large
+   - Click "Apply"
+
+4. **Panel 3: Warning Tables (Stat Panel)**
+   - Add another panel
+   - Query:
+   ```sql
+   SELECT COUNT(*) AS value
+   FROM dbo.vw_IdentityMetrics
+   WHERE PercentUsed >= 80 AND PercentUsed < 90;
+   ```
+   - Visualization: Stat
+   - Title: "Warning Tables (80-90%)"
+   - Color scheme: Yellow
+   - Click "Apply"
+
+5. **Panel 4: Detailed Table View**
+   - Add another panel
+   - Query:
+   ```sql
+   SELECT 
+       CONCAT(SchemaName, '.', TableName) AS [Table],
+       ColumnName AS [Column],
+       DataType AS [Type],
+       FORMAT(CurrentIdentityValue, 'N0') AS [Current Value],
+       FORMAT(MaxLimit, 'N0') AS [Max Limit],
+       CAST(PercentUsed AS DECIMAL(5,2)) AS [% Used],
+       FORMAT(RemainingIncrements, 'N0') AS [Remaining],
+       CASE 
+           WHEN PercentUsed >= 90 THEN 'Critical'
+           WHEN PercentUsed >= 80 THEN 'Warning'
+           WHEN PercentUsed >= 70 THEN 'Caution'
+           ELSE 'OK'
+       END AS [Status]
+   FROM 
+       dbo.vw_IdentityMetrics
+   ORDER BY 
+       PercentUsed DESC;
+   ```
+   - Visualization: Table
+   - Title: "Identity Column Details"
+   - Table settings:
+     - Enable column sorting
+     - Enable pagination (if many tables)
+   - Click "Apply"
+
+6. **Save the dashboard**
+   - Click disk icon at top
+   - Name: "Identity Column Monitoring"
+   - Click "Save"
+
+### Step 5: Configure Alerts
+
+1. **Create an Alert Rule**
+   - Click "Alerting" (bell icon) in left sidebar
+   - Click "Alert rules"
+   - Click "New alert rule"
+
+2. **Configure the alert - Section 1: Set alert query**
+   - Rule name: "Identity Column Approaching Limit"
+   - Select your SQL Server data source
+   - Query:
+   ```sql
+   SELECT 
+       CONCAT(SchemaName, '.', TableName) AS metric,
+       PercentUsed AS value
+   FROM 
+       dbo.vw_IdentityMetrics;
+   ```
+   - Click "Run queries" to test
+
+3. **Configure the alert - Section 2: Define alert conditions**
+   - Condition: Classic condition
+   - WHEN: `max()`
+   - OF: `query(A, 5m, now)`
+   - IS ABOVE: `80`
+   - FOR: `10m`
+
+4. **Configure the alert - Section 3: Add alert details**
+   - Folder: Default or create "Database Monitoring"
+   - Evaluation group: Create new "Identity Checks" (every 5m)
+   - Pending period: 10m
+   - Labels:
+     - `alert_type`: `identity_exhaustion`
+     - `severity`: `warning`
+   - Annotations:
+     - Summary: `Identity column {{ $labels.metric }} is at {{ $values.A }}% capacity`
+     - Description: `Table {{ $labels.metric }} identity column usage has exceeded threshold. Plan reseed or schema change.`
+
+5. **Create additional severity levels**
+   - Repeat steps 1-4 for:
+     - **Critical**: IS ABOVE 90, severity: critical
+     - **Caution**: IS ABOVE 70, severity: info
+
+6. **Configure notification channels**
+   - Go to "Alerting" → "Contact points"
+   - Click "New contact point"
+   - Choose your notification method:
+     - **Email**: Enter email addresses
+     - **Slack**: Enter webhook URL
+     - **Microsoft Teams**: Enter webhook URL
+     - **PagerDuty**: Enter integration key
+   - Test the contact point
+   - Click "Save"
+
+7. **Link alerts to notification channels**
+   - Go to "Alerting" → "Notification policies"
+   - Edit the default policy or create new
+   - Add matchers:
+     - `severity` = `critical` → PagerDuty
+     - `severity` = `warning` → Email/Slack
+     - `severity` = `info` → Email (optional)
+   - Click "Save"
+
+---
+
+## Phase 3: Testing and Validation (15 minutes)
+
+### Step 6: Test the Complete Setup
+
+1. **Verify data is flowing**
+   - Open your Grafana dashboard
+   - Panels should show data
+   - If no data, check SQL Server connection and query syntax
+
+2. **Test alerts manually**
+   - In SSMS, temporarily insert test data:
+   ```sql
+   -- Find a table with identity
+   SELECT TOP 1 * FROM dbo.vw_IdentityMetrics;
+   
+   -- If needed, create a test table with high identity
+   CREATE TABLE dbo.TestIdentityAlert (
+       ID INT IDENTITY(2000000000, 1) PRIMARY KEY,
+       TestData VARCHAR(50)
+   );
+   
+   -- Insert data to trigger alert
+   INSERT INTO dbo.TestIdentityAlert (TestData) VALUES ('Test');
+   
+   -- Check the view
+   SELECT * FROM dbo.vw_IdentityMetrics WHERE TableName = 'TestIdentityAlert';
+   ```
+
+3. **Wait for alert to fire**
+   - Should trigger within 5-10 minutes
+   - Check "Alerting" → "Alert rules" → State should be "Firing"
+   - Check your notification channel (email, Slack, etc.)
+
+4. **Clean up test data**
+   ```sql
+   DROP TABLE IF EXISTS dbo.TestIdentityAlert;
+   ```
+
+---
+
+## Phase 4: Maintenance and Optimization
+
+### Regular Tasks
+
+**Daily:**
+- Review Grafana dashboard for any warnings
+
+**Weekly:**
+- Check historical trends
+- Review any fired alerts
+
+**Monthly:**
+- Verify SQL Agent job is running successfully
+- Review and clean up old alert notifications
+- Update alert thresholds if needed
+
+### Optional Enhancements
+
+1. **Add Growth Rate Tracking** (after 1 week of data)
+   ```sql
+   -- Query to show growth rate
+   WITH GrowthRate AS (
+       SELECT 
+           SchemaName,
+           TableName,
+           AVG(CurrentIdentityValue - LAG(CurrentIdentityValue) 
+               OVER (PARTITION BY SchemaName, TableName ORDER BY RecordedAt)) AS AvgGrowthPer6Hours
+       FROM dbo.IdentityUsageHistory
+       WHERE RecordedAt >= DATEADD(DAY, -7, GETDATE())
+       GROUP BY SchemaName, TableName
+   )
+   SELECT 
+       CONCAT(g.SchemaName, '.', g.TableName) AS TableName,
+       g.AvgGrowthPer6Hours * 4 AS EstimatedDailyGrowth,
+       m.RemainingIncrements / NULLIF((g.AvgGrowthPer6Hours * 4), 0) AS EstimatedDaysRemaining
+   FROM GrowthRate g
+   JOIN dbo.vw_IdentityMetrics m ON g.SchemaName = m.SchemaName AND g.TableName = m.TableName
+   WHERE g.AvgGrowthPer6Hours > 0
+   ORDER BY EstimatedDaysRemaining ASC;
+   ```
+
+2. **Create Mobile Dashboard** (Grafana Mobile App)
+   - Download Grafana mobile app
+   - Connect to your Grafana instance
+   - Star your Identity Monitoring dashboard
+   - Enable push notifications for critical alerts
+
+3. **Add Slack Bot Integration**
+   - Configure Slack incoming webhook
+   - Add to Grafana contact points
+   - Get real-time alerts in team channel
+
+---
+
+## Troubleshooting
+
+### SQL Server Issues
+
+**Problem**: View returns no data
+- **Solution**: Check if database has tables with identity columns
+  ```sql
+  SELECT t.name, c.name 
+  FROM sys.tables t 
+  JOIN sys.columns c ON t.object_id = c.object_id 
+  WHERE c.is_identity = 1;
+  ```
+
+**Problem**: SQL Agent job fails
+- **Solution**: Check job history for error message
+- Verify SQL Server Agent service is running
+- Check database permissions
+
+### Grafana Issues
+
+**Problem**: "Database Connection OK" but no data in panels
+- **Solution**: 
+  - Check query syntax in panel
+  - Run query directly in SSMS
+  - Verify time range in Grafana (top right)
+
+**Problem**: Alerts not firing
+- **Solution**:
+  - Check alert rule state in "Alerting" → "Alert rules"
+  - Verify condition thresholds
+  - Check evaluation interval and frequency
+
+**Problem**: Notifications not received
+- **Solution**:
+  - Test contact point manually
+  - Check notification policies and matchers
+  - Verify webhook URLs or email settings
+
+---
+
+## Security Considerations
+
+1. **SQL Server Access**
+   - Use least privilege account for Grafana connection
+   - Grant only SELECT on views, EXECUTE on procedures
+   - Never use sa or admin accounts
+
+2. **Grafana Security**
+   - Enable HTTPS for Grafana
+   - Use strong passwords
+   - Configure authentication (LDAP/OAuth if available)
+   - Restrict dashboard editing permissions
+
+3. **Network Security**
+   - Ensure SQL Server firewall allows Grafana server
+   - Use VPN if accessing remotely
+   - Enable SQL Server encryption (TLS)
+
+---
+
+## Success Checklist
+
+- [ ] SQL objects created (view, table, stored procedure)
+- [ ] SQL Agent job scheduled and running
+- [ ] Grafana data source connected successfully
+- [ ] Dashboard created with all 4 panels
+- [ ] Alerts configured for 3 severity levels
+- [ ] Notification channels configured and tested
+- [ ] Test alert fired successfully
+- [ ] Documentation saved for team reference
+- [ ] Schedule regular review meetings
+
+---
+
+## Next Steps
+
+1. **Monitor for 1 week** to establish baseline
+2. **Adjust alert thresholds** based on your environment
+3. **Document remediation procedures** for when alerts fire
+4. **Train team** on interpreting dashboard and responding to alerts
+5. **Consider automation** for identity reseeding when limits approached
+
+You now have a complete monitoring solution that will warn you before identity columns reach their limits!
