@@ -1,0 +1,43 @@
+USE iHerb_Tax; -- IMPORTANT: Change this to your target database
+GO
+
+-- Drop the procedure if it already exists
+IF OBJECT_ID('dbo.sp_CheckIdentityValues', 'P') IS NOT NULL
+    DROP PROCEDURE dbo.sp_CheckIdentityValues;
+GO
+
+CREATE PROCEDURE dbo.sp_CheckIdentityValues
+AS
+BEGIN
+    SET NOCOUNT ON;
+
+    SELECT
+        OBJECT_SCHEMA_NAME(t.object_id) AS TableSchema,
+        t.name AS TableName,
+        c.name AS IdentityColumnName,
+        CAST(ic.last_value AS BIGINT) AS CurrentIdentityValue, -- Current (Last Used) Value
+        CAST(ic.seed_value AS BIGINT) AS SeedValue,             -- Starting Value
+        CAST(ic.increment_value AS BIGINT) AS IdentityIncrement, -- Increment Step
+        -- Calculate the theoretical max value based on the column's data type
+        CASE
+            WHEN TYPE_NAME(c.system_type_id) = 'tinyint' THEN 255
+            WHEN TYPE_NAME(c.system_type_id) = 'smallint' THEN 32767
+            WHEN TYPE_NAME(c.system_type_id) = 'int' THEN 2147483647
+            WHEN TYPE_NAME(c.system_type_id) = 'bigint' THEN 9223372036854775807
+            ELSE NULL -- Should not happen for IDENTITY columns
+        END AS MaxIdentityValue
+    FROM
+        sys.tables AS t
+    INNER JOIN
+        sys.identity_columns AS ic ON t.object_id = ic.object_id
+    INNER JOIN
+        sys.columns AS c ON t.object_id = c.object_id AND ic.column_id = c.column_id
+    WHERE
+        t.is_ms_shipped = 0 -- Exclude system tables
+    ORDER BY
+        t.name;
+END
+GO
+
+-- EXECUTION EXAMPLE:
+-- EXEC dbo.sp_CheckIdentityValues;
