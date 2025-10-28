@@ -1,0 +1,21 @@
+# 1. Check what instance ID is in state
+tofu state show aws_instance.cloned | grep "id ="
+
+# 2. Try to describe that instance in AWS CLI
+aws ec2 describe-instances --instance-ids i-XXXXX
+
+# 3. Tell me the exact error message you get
+```
+
+**Then I can give you the exact fix!**
+
+---
+
+## 🎯 Quick Checklist
+```
+☐ Can you run: aws ec2 describe-instances (without errors)?
+☐ Is the instance ID in state file the same as what you created?
+☐ Is the instance still running in AWS console?
+☐ Are you looking in the correct AWS region?
+☐ Are you using the correct AWS profile/credentials?
+☐ Has the instance been terminated manually?
