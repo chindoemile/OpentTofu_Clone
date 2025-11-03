@@ -1,0 +1,274 @@
+While the build process is constantly evolving, let’s make sure following components are validated upon receiving the SQL server:
+
+SQL server name
+All names returned from below shall be the same
+
+
+
+select  
+  @@servername as 'servername\instancename',
+  serverproperty('servername') as 'servername',
+  serverproperty('machinename') as 'windows_name',
+  serverproperty('computernamephysicalnetbios') as 'netbios_name',
+  name 
+from sys.servers where server_id = 0
+Note: If the names don't match up because of recent hostname change such as 
+
+
+You can correct the names with the follow code, please note it is case sensitive
+
+
+
+EXEC sp_dropserver 'OldServerName';  
+GO  
+EXEC sp_addserver 'NewServerName', local;  
+GO
+And then Restart SQL Services and it will take the new name change
+
+ 
+
+Service Principal Name for Kerberos Connections
+
+
+select auth_scheme from sys.dm_exec_connections where session_id = @@spid ;
+It shall return ‘KERBEROS’ in the output;
+
+Need domain admin privilege to fix it by running below script; 
+
+Shall run for all cluster nodes & the listener
+
+
+
+setspn -A MSSQLSvc/myhost.redmond.microsoft.com:1433 redmond\accountname
+ 
+
+EBS volumes
+All Drives except C should be in GPT Format
+
+
+You can check by running Get-Disk in Powershell.  If they are in MBR format they will need to be converted to GPT, this requires deleting the volume so its important to not to skip this step.  If they need to be converted to GPT you can follow instructions here: Converting MBR to GPT
+
+Allocation Unit size shall be 64KB (except C & D which come with the AMI)
+
+
+
+fsutil fsinfo ntfsinfo e:
+or
+
+
+
+$wmiQuery = "SELECT Name, Label, Blocksize FROM Win32_Volume WHERE FileSystem='NTFS'"
+Get-WmiObject -Query $wmiQuery -ComputerName '.' | Sort-Object Name | Select-Object Name, Label, Blocksize
+Check AWS console and Disk Management
+
+Disk letter and labels 
+
+Drive letter should be tagged in AWS console
+
+Volume sizes
+
+Ensure all data drives have enough free space to cover 6-12 months of organic data growth. Refer to the below table for appropriate thresholds
+
+Ensure that the drive used for database log files has at least 60% empty space
+
+Ensure that the drive used for tempdb data files is close to 500 GBs - 1 TBs in size with almost 70-80% empty. If the tempdb is sharing the same drives as the user databases, then follow the above listed Free space guidelines.
+
+Disk Size Range
+
+Free Space %  
+
+0 - 100 GBs
+
+20
+
+101 - 500 GBs
+
+15
+
+510 GBs - 1 TB
+
+12
+
+1 TB - 3 TBs
+
+10
+
+3 TBs - 10 TBs
+
+7
+
+10 TBs -  Max.
+
+5
+
+Check AWS console 
+
+Storage type shall be gp3 (instead of gp2)
+
+EBS volume shall be encrypted via aws/default key
+
+ 
+
+Perform Volume Maintenance permission (Instant File Initialization)
+Enable Instant File Initialization: 
+
+Assign the Perform Volume Maintenance permission to the SQL Server service account (use secpol.msc from the windows Run menu)
+
+
+Go to local security policies under > local policies > users rights assignments.  
+
+Add the service account to the perform volume maintenances tasks and select apply
+
+Query to verify:
+
+
+
+use master;
+SELECT  servicename, service_account, instant_file_initialization_enabled
+FROM    sys.dm_server_services WITH (NOLOCK)
+WHERE   servicename LIKE 'SQL Server (%'
+ 
+
+Lock Pages in Memory permission
+Assign the Lock Pages in Memory permission to the SQL Server service account (use gpedit.msc from the windows Run menu)
+
+
+Ensure SQL Server service account is in the Local Admin Group (right click on start menu, click computer management, go to local users and groups, click groups and then double click on administrators)
+
+ 
+
+SQL dependencies in Registry
+Open powershell as administrator, run script below
+
+
+
+ # needs registry access permissions
+$RegistryPath = "HKLM:\SYSTEM\CurrentControlSet\Services\MSSQLSERVER"
+If (-NOT (Test-Path $RegistryPath)) {
+    Write-Output "Registry Path does not exist"
+    return
+}  
+$Value_BeforeUpdate = Get-ItemProperty -Path $RegistryPath -Name DependOnService
+Write-Output ("Value_BeforeUpdate: " + $Value_BeforeUpdate.DependOnService)
+$DosName = 'DependOnService'
+$DosValue = 'KEYISO','W32Time','Netlogon'
+$DosPropertyType = 'MultiString'
+New-ItemProperty -Path $RegistryPath -Name $DosName -Value $DosValue -PropertyType $DosPropertyType -Force
+$Value_AfterUpdate = Get-ItemProperty -Path $RegistryPath -Name DependOnService
+Write-Output ("Value_AfterUpdate: " + $Value_AfterUpdate.DependOnService) 
+ 
+
+Paging file size 
+On C drive
+
+Set page file Initial size and Max Size
+
+Example for prod instance with ~64GB RAM, 200GB C drive
+
+Initial size 4 GB (4096 MB)
+
+Maximum size 20 GB (20480 MB)
+
+Example for test/preprod instance with ~8GB RAM, 100GB C drive
+
+Initial Size 2 GB (2048 MB) 
+
+Maximum size 12 GB (12288 MB)
+
+Note: may need adjustment depending on RAM, C drive, usage
+
+Run sysdm.cpl
+
+Go to Advanced 
+
+Select Settings under Performance
+
+Go to Advanced (again)
+
+Change under Virtual Memory
+
+Powershell script (run with appropriate values e.g., test/preprod vs prod)
+
+
+
+# Run as administrator
+# Check if "Automatically manage paging file size for all drives" is checked
+Write-Output ("`n`nAutomaticManagedPagefile: " + (Get-CimInstance Win32_ComputerSystem).AutomaticManagedPagefile)
+If ((Get-CimInstance Win32_ComputerSystem).AutomaticManagedPagefile) {
+    $pagefile = Get-WmiObject Win32_ComputerSystem -EnableAllPrivileges
+    $pagefile.AutomaticManagedPagefile = $false
+    $pagefile.put() | Out-Null
+    Write-Output ("Unchecked auto manage")
+}
+# Check current customized initial and max sizes
+$current = Gwmi win32_Pagefilesetting | Select Name, InitialSize, MaximumSize
+Write-Output ("Current setting: ")
+$current
+If (($current.name) -eq "C:\pagefile.sys") {
+    # If paging file is already on desired C drive
+    #     Test/Preprod 2048mb (2gb) - 12288mb (12gb)
+    #     Prod 4096mb (4gb) - 20480mb (20gb)
+    $pagefileset = Get-WmiObject Win32_pagefilesetting
+    $pagefileset.InitialSize = 2048
+    $pagefileset.MaximumSize = 12288
+    $pagefileset.Put() | Out-Null
+    Write-Output ("Updated size for C drive")
+}
+else {
+    Write-Output ("Paging file not in standard location, not updated")
+}
+# Check updated customized initial and max sizes
+Write-Output ("`nUpdated setting: ")
+(Gwmi win32_Pagefilesetting | Select Name, InitialSize, MaximumSize) 
+Reboot server for currently allocated amount to reflect new size
+
+
+
+         
+
+SQL patched to latest version
+Latest updates and version history for SQL Server - SQL Server 
+
+ 
+
+PV Driver
+PV Driver - Ensure the AWS PV drivers are upgraded
+
+In PowerShell, check what PV driver version installed on the machine
+
+
+
+Get-ItemProperty HKLM:\SOFTWARE\Amazon\PVDriver
+Check for latest available PV driver package version: https://docs.aws.amazon.com/AWSEC2/latest/WindowsGuide/xen-drivers-overview.html#pv-driver-history
+
+Follow instructions to upgrade to latest driver: https://docs.aws.amazon.com/AWSEC2/latest/WindowsGuide/Upgrading_PV_drivers.html#aws-pv-upgrade
+
+Caution: Upgrade forces reboot
+
+ 
+
+Volume Shadow Copy disabled
+Policy around shadow copies - Ensure the VSS service is disabled:
+
+Open PowerShell 
+
+Run: Get-Service VSS
+
+Output should read:
+
+
+ 
+
+dbatools 
+(Download ) - Method 1 should work for newer server deployments
+
+Run in PowerShell (Administrator mode)
+
+
+
+Install-Module dbatools
+Enter “Y” to if prompted to install NuGet provider
+
+Enter “A” to install from an Untrusted repository
+
+ 
