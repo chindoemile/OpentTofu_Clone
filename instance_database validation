@@ -1,0 +1,422 @@
+The following are the guidelines/best-practices that should be adhered on all SQL Server instances:
+
+ 
+
+Replication
+Check for Replication Feature and install if necessary
+
+
+
+USE master;
+GO
+DECLARE @installed INT;
+EXEC @installed = sys.sp_MS_replication_installed;
+SELECT @installed;
+ 
+
+Max Text Repl size
+Check and Set Max Text Repl Size (note: value will vary on environment)
+
+
+
+--CHECK CURRENT VALUES
+EXEC sp_configure 'show advanced options', 1 ; 
+RECONFIGURE ; 
+GO
+EXEC sp_configure 'max text repl size'; 
+GO
+--SET REPL SIZE PER YOUR ENVIRONMENT
+EXEC sp_configure 'max text repl size', 2147483647;  
+GO 
+RECONFIGURE;  
+GO
+ 
+
+Full-text Search
+Check for Full Text Search and install if necessary
+
+
+
+SELECT FULLTEXTSERVICEPROPERTY('IsFullTextInstalled')
+--1: Installed
+--0: Not Installed
+ 
+
+FILESTREAM (if applicable)
+Check if FILESTREAM is enabled and at what access level
+
+
+
+USE master;
+GO
+EXEC sys.sp_configure @configname = 'filestream access level';
+--0: FILESTREAM is disabled
+--1: FILESTREAM is enabled for Transact-SQL access
+--2: FILESTREAM is enabled for Transact-SQL and streaming
+Enable FILESTREAM (if applicable)
+
+Open SQL Server Configuration Manager
+
+In SQL Server Services, right-click on the instance of SQL Server (usually the default “MSSQLSERVER”) and click Properties
+
+Open the FILESTREAM tab
+
+Select Enable FILESTREAM for Transact-SQL access
+
+Select Enable FILESTREAM for file I/O streaming access
+
+Select Allow remote clients to have streaming access to FILESTREAM data
+
+Click Apply
+
+In SSMS, execute the following command
+
+
+
+EXEC sp_configure filestream_access_level, 2  
+RECONFIGURE
+Restart the SQL Server service
+
+ 
+
+SQL Server Services
+SQL Server services should be set to run ‘automatic’ in Configuration Manager
+
+ 
+
+Trace flag 3226
+Trace flag 3226 should be set as a startup parameter (this flag prevents SQL from logging and flooding the SQL error log with every successful log backup )
+
+SQL Server Startup Parameters
+Check and Set Trace Flag 3226 as a Startup Parameter
+
+
+
+--CHECK FOR TRACE 3226
+select registry_key, value_name, value_data
+from sys.dm_server_registry  
+where value_data = '-T3226'
+--ENABLE TRACE 3226
+--ALSO ADD IT AS A STARTUP PARAMETER IN THE CONFIGURATIONS MANAGER (IF APPLICABLE)
+DBCC TRACEON (3226, -1)
+ 
+
+Mixed Mode Authentication
+SQL Server should be configured for Mixed Mode Authentication
+
+
+Check SQL Server Authentication Mode
+
+
+
+SELECT @@SERVERNAME,CASE SERVERPROPERTY('IsIntegratedSecurityOnly')   
+WHEN 1 THEN 'Windows Authentication'   
+WHEN 0 THEN 'Windows and SQL Server Authentication'   
+END as [Authentication Mode] 
+ 
+
+Check Configuration Settings
+
+
+SELECT @@servername, CONVERT(VARCHAR(60), name) AS 'Name', value
+FROM sys.configurations
+WHERE name in ('max server memory (MB)', 'min server memory (MB)', 'cost threshold for parallelism', 'max degree of parallelism', 
+			'remote admin connections', 'optimize for ad hoc workloads', 'remote login timeout (s)')
+ 
+
+SQL server memory allocation (single instance): Min and Max Memory
+Check RAM installed on the server
+
+Max: shall be 88% of the server physical memory
+
+Min: shall be 10% of the server physical memory
+
+(In case the EC2 instance type is adjusted after applying the Ansible build)
+
+
+
+USE master;
+DECLARE @max_server_memory BIGINT,
+        @min_server_memory BIGINT;
+SELECT @max_server_memory = CONVERT(BIGINT, total_physical_memory_kb / 1024 * .88),
+       @min_server_memory = CONVERT(BIGINT, total_physical_memory_kb / 1024 * .1)
+FROM sys.dm_os_sys_memory;
+EXEC sys.sp_configure @configname = 'show advanced options', -- varchar(35)
+                      @configvalue = 1;                      -- int
+RECONFIGURE;
+EXEC sp_configure 'max server memory', @max_server_memory;
+RECONFIGURE;
+EXEC sp_configure 'min server memory', @min_server_memory;
+RECONFIGURE;
+EXEC sys.sp_configure @configname = 'show advanced options', -- varchar(35)
+                      @configvalue = 0;                      -- int
+RECONFIGURE;	
+ 
+
+Max. Degree of Parallelism (MAXDOP)
+The Max. Degree of Parallelism (MAXDOP) should be set to : @cpu/2>=16 then 16 else @cpu/2
+
+
+(In case the EC2 instance type is adjusted after applying the Ansible build)
+
+
+
+USE master;
+DECLARE @cpu INT,
+        @maxdop INT;
+SELECT @cpu = CASE
+                  WHEN hyperthread_ratio = cpu_count THEN
+                      cpu_count
+                  ELSE
+    (cpu_count / hyperthread_ratio) * ((cpu_count - hyperthread_ratio) / (cpu_count / hyperthread_ratio))
+              END
+FROM master.sys.dm_os_sys_info;
+SELECT @maxdop = CASE
+                     WHEN @cpu / 2 >= 16 THEN
+                         16
+                     ELSE
+                         @cpu / 2
+                 END;
+EXEC sys.sp_configure @configname = 'show advanced options', -- varchar(35)
+                      @configvalue = 1;
+EXEC sp_configure @configname = 'max degree of parallelism',
+                  @configvalue = @maxdop;
+RECONFIGURE;
+EXEC sys.sp_configure @configname = 'show advanced options', -- varchar(35)
+                      @configvalue = 0;  
+ 
+
+Cost Threshold for parallelism
+The Cost Threshold for parallelism should be set to 150.
+
+
+Set Cost Threshold for Parallelism to 150
+
+
+
+--SET COST THRESHOLD of PARALLELISM
+EXEC sys.sp_configure N'show advanced options', N'1'  RECONFIGURE WITH OVERRIDE
+GO
+EXEC sys.sp_configure N'cost threshold for parallelism', N'150'
+GO
+RECONFIGURE WITH OVERRIDE
+GO
+EXEC sys.sp_configure N'show advanced options', N'0'  RECONFIGURE WITH OVERRIDE
+GO
+ 
+
+Optimize for Ad hoc Workloads
+The Optimize for Ad hoc Workloads should be set to True
+
+
+Set Optimize for ad hoc workloads to TRUE
+
+
+
+EXEC sys.sp_configure N'optimize for ad hoc workloads', N'1';
+GO
+RECONFIGURE WITH OVERRIDE;
+GO
+ 
+
+Remote Login Timeout
+The Remote Login Timeout should be set to 10.
+
+
+
+ 
+
+DAC (Dedicated Admin Connection)
+Enable DAC (Dedicated Admin Connection) setting on the server (use sp_configure system procedure to enable it). In the below example, it is set to not enabled.
+
+
+Enable remote admin connections (DAC)
+
+
+
+sp_configure 'remote admin connections', 1;  
+GO  
+RECONFIGURE;  
+GO 
+ 
+
+Job Schedules
+Run the below query to find the jobs without a schedule. 
+
+
+
+use msdb;
+SELECT j.name, s.name
+FROM msdb.dbo.sysjobs j
+LEFT JOIN msdb.dbo.sysjobschedules js ON js.job_id = j.job_id
+LEFT JOIN msdb.dbo.sysschedules s ON js.schedule_id = s.schedule_id
+ 
+
+OpsGenie Operator (TBD if still needed)
+
+
+use msdb;
+exec sp_help_operator 'OpsGenie'
+ 
+
+Database Availability Group Level
+The following are the guidelines/best-practices that should be adhered on all SQL Databases that have Availability Groups enabled:
+
+Check if HADR is Enabled
+
+
+
+SELECT SERVERPROPERTY ('IsHadrEnabled');
+--1 means enabled
+--0 means disabled
+ 
+
+If an AG has 2 or mode nodes, then ensure that at least 2 nodes are in Synchronous mode with Auto-Failover enabled
+
+
+
+ 
+
+Database Level
+The following are the guidelines/best-practices that should be adhered on all SQL Databases:
+
+Ensure the tempdb has at least 4 data files of the same size. This will reduce any Latch contention and other tempdb related issues
+
+All database should be enabled for auto growth. The growth should not be using a percentage (%), rather a fixed MBs. Use the following table to come up with a good auto growth size:
+
+Data File Size
+
+Recommended Auto growth size
+
+0 - 50 GBs
+
+1,024 MB (1 GB)
+
+51 - 100 GBs
+
+2,048 MB (2 GBs)
+
+101 - 500 GBs
+
+10,240 MB (10 GBs)
+
+501 - 1 TB
+
+51,200 (50 GBs)
+
+1 TB - 10 TBs
+
+102,400 (100 GBs)
+
+The user database log file should be not more than 50 GBs with auto growth set to 1-2 GBs  
+
+Ensure that the initial size of model database is set to 1024 MB with a auto growth also of 1024 MB.
+
+Ensure that the Admin database is in simple recovery mode
+
+
+
+Ensure that all user databases are in Full recovery mode (except for the Catalog databases which should be in Simple recovery mode)
+
+
+
+Ensure that the Auto Update Statistics Asynchronously setting is set to True
+
+
+
+Ensure that the Page Verify setting is set to CHECKSUM
+
+
+
+Ensure that the Auto Create Statistics setting is set to True
+
+
+
+Ensure that the Query Store feature is enabled for user databases ( except Admin database) on SQL version 2016 and above
+
+
+
+Ensure all user databases (each database filegroup) have enough free space to cover 6-12 months of organic data growth. Refer to the below table for appropriate thresholds:
+
+DB Filegroup Size
+
+Free space %
+
+0 - 100 GBs
+
+20
+
+101 - 500 GBs
+
+15
+
+510 GBs - 1 TB
+
+12
+
+1 TB - 3 TBs
+
+10
+
+3 TBs - 10 TBs
+
+7
+
+10 TBs -  Max.
+
+5
+
+Ensure that the Delayed Durability setting is set to Disabled
+
+
+
+ 
+
+ 
+
+Scripts to be used (Recommended for standardization*)
+* Feel free to use your own or modify the below queries according to your preference
+
+Query Store
+ 
+
+To Enable Query Store for a Database (SQL 2016 and above versions only)
+
+ALTER DATABASE <DB-Name>
+SET QUERY_STORE = ON
+(
+OPERATION_MODE = READ_WRITE,		-- Values = READ_WRITE (Default) or READ_ONLY. This option either enables Query Store to continue collecting data or make is read-only.
+CLEANUP_POLICY = (STALE_QUERY_THRESHOLD_DAYS = 10), -- Values = x ( # of days, default is 30)...This specifies the number of days to retain data in the Query Store.
+DATA_FLUSH_INTERVAL_SECONDS = 300,	-- Values = x (# of seconds, default is 900)...This determines the frequency at which data written to the query store is persisted to disk.
+MAX_STORAGE_SIZE_MB = 2048,			-- Values = x (# if MBs, default is 100 MB)... This determines the maximum size of the Query Store.When Query store hits this limit, it automatically changes state from read-write to read-only mode
+INTERVAL_LENGTH_MINUTES = 60,		-- values = x ( # of minutes, default is 60)... Determines the time interval at which runtime execution statistics data is aggregated into the query store.
+SIZE_BASED_CLEANUP_MODE = AUTO,		-- values = AUTO or OFF (default is AUTO)... Controls whether the cleanup process will be automatically activated when total amount of data gets close to the max size.
+QUERY_CAPTURE_MODE  = AUTO,			-- Values = ALL or AUTO or NONE (default is ALL)... ALL = captues all queries, NONE = stops capturing new queries, AUTO = ignore infrequent and queries with insignificant compile and execution duration. Determines if the Query store captures all queries, or relevant queries based on execution count and resource consumption, or stops adding new queries and just track current queries
+MAX_PLANS_PER_QUERY = 10			-- Values = x ... determines the maximum number of plans maintained for each query
+);
+
+
+To Disable Query Store
+ALTER DATABASE <DB-Name>
+SET QUERY_STORE = OFF
+
+
+To Clear Query Store Data
+ALTER DATABASE <DB-Name>
+SET QUERY_STORE CLEAR
+
+
+To look at the current Query Store Stats (if it is enabled for a DB)
+SELECT actual_state_desc AS 'ActualState', desired_state_desc AS 'DesiredState', readonly_reason, query_capture_mode_desc,
+current_storage_size_mb AS 'CurrentSizeInMB', max_storage_size_mb  AS 'MaxSizeInMB', flush_interval_seconds AS 'FlushIntervalInSec'
+, interval_length_minutes  AS 'IntervalLengthInMin', stale_query_threshold_days AS 'StaleQueryThresholdInDays'
+, size_based_cleanup_mode_desc AS 'CleanupMode', max_plans_per_query AS 'MaxPlansPerQuery',
+actual_state_additional_info AS 'AdditionalInfo' FROM sys.database_query_store_options WITH (NOLOCK)
+
+
+To convert Query store from the default write-mode to read-mode
+ALTER DATABASE db_name
+SET QUERY_STORE ( OPERATION_MODE = READ_ONLY);
+
+Related content
+
