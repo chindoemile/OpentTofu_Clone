@@ -1,0 +1,5 @@
+next steps:
+launch a windows instance
+ - develop a userdata launch script that installs git, ansible and dependencies
+clone the dba.ansible repo
+launch ansible with a test playbook
